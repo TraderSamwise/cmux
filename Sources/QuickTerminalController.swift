@@ -531,16 +531,6 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
             appDelegate.applyWindowDecorations(to: window)
         }
 
-        // Hide on focus loss
-        NotificationCenter.default.addObserver(
-            forName: NSWindow.didResignKeyNotification,
-            object: window,
-            queue: .main
-        ) { [weak self] _ in
-            guard let self, self.isVisible, !self.isAnimating else { return }
-            self.hide()
-        }
-
         return window
     }
 
