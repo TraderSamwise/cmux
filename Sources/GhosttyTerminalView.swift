@@ -2209,6 +2209,11 @@ class GhosttyApp {
                     }
                 }
             }
+        case GHOSTTY_ACTION_TOGGLE_QUICK_TERMINAL:
+            return performOnMain {
+                QuickTerminalController.shared.toggle()
+                return true
+            }
         default:
             return false
         }

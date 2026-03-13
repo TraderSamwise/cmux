@@ -2209,6 +2209,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         installBrowserAddressBarFocusObservers()
         installShortcutMonitor()
         installShortcutDefaultsObserver()
+        installQuickTerminal()
         NSApp.servicesProvider = self
 #if DEBUG
         UpdateTestSupport.applyIfNeeded(to: updateController.viewModel)
@@ -7534,6 +7535,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             guard refreshedManagers.insert(identifier).inserted else { continue }
             manager.refreshSplitButtonTooltips()
         }
+    }
+
+    private func installQuickTerminal() {
+        let controller = QuickTerminalController.shared
+        controller.loadConfiguration()
+        controller.installGlobalHotkey()
     }
 
     private func installGhosttyConfigObserver() {
