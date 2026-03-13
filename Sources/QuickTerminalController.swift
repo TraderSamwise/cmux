@@ -53,6 +53,7 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
     private var sidebarSelectionState: SidebarSelectionState?
     private var isVisible = false
     private var isAnimating = false
+    private var lastFrame: NSRect?
     private(set) var windowId: UUID?
 
     // MARK: - Global Hotkey
@@ -349,7 +350,7 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
 
         guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
         let visibleFrame = screen.visibleFrame
-        let targetFrame = quickTerminalFrame(in: visibleFrame)
+        let targetFrame = lastFrame ?? quickTerminalFrame(in: visibleFrame)
 
         // Set initial off-screen frame for slide animation
         var startFrame = targetFrame
@@ -393,6 +394,7 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
         guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
         let visibleFrame = screen.visibleFrame
         let currentFrame = win.frame
+        lastFrame = currentFrame
 
         var endFrame = currentFrame
         switch position {
