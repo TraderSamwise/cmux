@@ -9,7 +9,7 @@ import SwiftUI
 /// hotkey. Unlike Ghostty's quick terminal, cmux's version hosts a full
 /// ContentView with sidebar and tabs.
 @MainActor
-final class QuickTerminalController {
+final class QuickTerminalController: NSObject, NSWindowDelegate {
 
     // MARK: - Types
 
@@ -49,9 +49,11 @@ final class QuickTerminalController {
 
     private var window: NSWindow?
     private var tabManager: TabManager?
+    private var sidebarState: SidebarState?
+    private var sidebarSelectionState: SidebarSelectionState?
     private var isVisible = false
     private var isAnimating = false
-    private var windowId: UUID?
+    private(set) var windowId: UUID?
 
     // MARK: - Global Hotkey
 
@@ -66,7 +68,9 @@ final class QuickTerminalController {
     // MARK: - Singleton
 
     static let shared = QuickTerminalController()
-    private init() {}
+    private override init() {
+        super.init()
+    }
 
     // MARK: - Setup
 
@@ -417,7 +421,31 @@ final class QuickTerminalController {
             win.alphaValue = 1 // reset for next show
             self?.isAnimating = false
             self?.isVisible = false
+
+            // Give focus back to the previously active app. Check if cmux
+            // has any other visible main windows; if not, deactivate entirely.
+            DispatchQueue.main.async {
+                let hasOtherVisibleWindow = NSApp.windows.contains { w in
+                    w !== win && w.isVisible && !w.isMiniaturized
+                        && w.windowNumber > 0
+                        && (w.styleMask.contains(.titled) || w.styleMask.contains(.fullSizeContentView))
+                }
+                if !hasOtherVisibleWindow {
+                    NSApp.hide(nil)
+                }
+            }
         })
+    }
+
+    // MARK: - NSWindowDelegate
+
+    nonisolated func windowShouldClose(_ sender: NSWindow) -> Bool {
+        MainActor.assumeIsolated {
+            if isVisible, !isAnimating {
+                hide()
+            }
+        }
+        return false
     }
 
     // MARK: - Window Creation
@@ -427,8 +455,22 @@ final class QuickTerminalController {
         self.tabManager = manager
 
         let sidebarState = SidebarState(isVisible: true)
+        self.sidebarState = sidebarState
         let sidebarSelectionState = SidebarSelectionState(selection: .tabs)
+        self.sidebarSelectionState = sidebarSelectionState
         let notificationStore = TerminalNotificationStore.shared
+
+        // Apply pending session snapshot BEFORE creating the ContentView so
+        // SwiftUI initializes with the restored workspaces, not empty state.
+        if let snapshot = pendingSessionSnapshot {
+            pendingSessionSnapshot = nil
+            manager.restoreSessionSnapshot(snapshot.tabManager)
+            sidebarState.isVisible = snapshot.sidebar.isVisible
+            sidebarState.persistedWidth = CGFloat(
+                SessionPersistencePolicy.sanitizedSidebarWidth(snapshot.sidebar.width)
+            )
+            sidebarSelectionState.selection = snapshot.sidebar.selection.sidebarSelection
+        }
 
         let wId = UUID()
         self.windowId = wId
@@ -458,6 +500,22 @@ final class QuickTerminalController {
         window.hasShadow = true
         window.identifier = NSUserInterfaceItemIdentifier("cmux.quickTerminal")
         window.contentView = NSHostingView(rootView: root)
+        window.delegate = self
+
+        // Safety net: if the window is somehow destroyed despite windowShouldClose,
+        // reset state so toggle() will recreate it.
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.window = nil
+            self.tabManager = nil
+            self.sidebarState = nil
+            self.sidebarSelectionState = nil
+            self.isVisible = false
+        }
 
         // Register with AppDelegate so terminal surfaces work properly
         if let appDelegate = AppDelegate.shared {
@@ -530,5 +588,18 @@ final class QuickTerminalController {
                 height: height
             )
         }
+    }
+
+    // MARK: - Session Restore
+
+    /// Stash a session snapshot to be applied when the visor window is first created.
+    private var pendingSessionSnapshot: SessionWindowSnapshot?
+
+    /// Queue a session snapshot for deferred restore.
+    /// The snapshot is applied lazily in `createQuickTerminalWindow()` so we
+    /// don't create an AppKit window during startup restore (which would
+    /// re-enter `registerMainWindow` / `attemptStartupSessionRestoreIfNeeded`).
+    func restoreSession(_ snapshot: SessionWindowSnapshot) {
+        pendingSessionSnapshot = snapshot
     }
 }
