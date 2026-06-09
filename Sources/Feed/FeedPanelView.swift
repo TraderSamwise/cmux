@@ -940,26 +940,17 @@ struct FeedRowActions {
         FeedRowActions(
             approvePermission: { itemId, mode in
                 Task { @MainActor in
-                    FeedCoordinator.shared.deliverReply(
-                        requestId: Self.requestId(for: itemId) ?? itemId.uuidString,
-                        decision: .permission(mode)
-                    )
+                    FeedCoordinator.shared.resolve(itemId: itemId, decision: .permission(mode))
                 }
             },
             replyQuestion: { itemId, selections in
                 Task { @MainActor in
-                    FeedCoordinator.shared.deliverReply(
-                        requestId: Self.requestId(for: itemId) ?? itemId.uuidString,
-                        decision: .question(selections: selections)
-                    )
+                    FeedCoordinator.shared.resolve(itemId: itemId, decision: .question(selections: selections))
                 }
             },
             approveExitPlan: { itemId, mode, feedback in
                 Task { @MainActor in
-                    FeedCoordinator.shared.deliverReply(
-                        requestId: Self.requestId(for: itemId) ?? itemId.uuidString,
-                        decision: .exitPlan(mode, feedback: feedback)
-                    )
+                    FeedCoordinator.shared.resolve(itemId: itemId, decision: .exitPlan(mode, feedback: feedback))
                 }
             },
             jump: { workstreamId in
@@ -976,19 +967,6 @@ struct FeedRowActions {
                 }
             }
         )
-    }
-
-    @MainActor
-    private static func requestId(for itemId: UUID) -> String? {
-        guard let store = FeedCoordinator.shared.store else { return nil }
-        return store.items.first(where: { $0.id == itemId }).flatMap { item in
-            switch item.payload {
-            case .permissionRequest(let rid, _, _, _): return rid
-            case .exitPlan(let rid, _, _): return rid
-            case .question(let rid, _): return rid
-            default: return nil
-            }
-        }
     }
 }
 

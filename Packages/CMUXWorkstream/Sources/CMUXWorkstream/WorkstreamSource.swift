@@ -17,6 +17,9 @@ public enum WorkstreamSource: String, Codable, Sendable, CaseIterable, Equatable
     case codebuddy
     case factory
     case qoder
+    /// Agents managed by aimux (Claude/Codex in aimux tmux sessions),
+    /// surfaced via the aimux daemon's interaction API, not a local hook.
+    case aimux
 
     /// Parses a wire-frame `_source` string. Unknown sources fall back to
     /// `nil`; callers should persist the raw string separately when they want

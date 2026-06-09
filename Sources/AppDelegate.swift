@@ -1269,12 +1269,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         // wiring: the store is a plain singleton here, and the socket
         // `feed.*` V2 verbs in `TerminalController` push into it directly
         // via `FeedCoordinator`.
+        // The aimux source streams aimux-managed agents' permission prompts
+        // into the Feed (daemon at AIMUX_DAEMON_URL, default :43190) and
+        // routes decisions back over HTTP. cmux's own hook items still push
+        // through FeedCoordinator directly, independent of this transport.
+        let aimuxTransport = AimuxWorkstreamTransport()
         FeedCoordinator.shared.install(
             store: WorkstreamStore(
-                transport: NullWorkstreamTransport(),
+                transport: aimuxTransport,
                 persistence: WorkstreamPersistence(fileURL: WorkstreamPersistence.defaultFileURL())
             )
         )
+        FeedCoordinator.shared.installAimuxTransport(aimuxTransport)
         StartupBreadcrumbLog.append("appDelegate.didFinish.feedStore.installed")
         Task { @MainActor in
             await FeedCoordinator.shared.store?.start()

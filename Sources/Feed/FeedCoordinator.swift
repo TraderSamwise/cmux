@@ -20,6 +20,10 @@ final class FeedCoordinator: @unchecked Sendable {
     // so it hops to main explicitly when touching the store.
     @MainActor private(set) var store: WorkstreamStore!
 
+    /// Set when the aimux source is installed. Routes Feed decisions for
+    /// aimux-sourced items back to the aimux daemon over HTTP.
+    @MainActor private var aimuxTransport: AimuxWorkstreamTransport?
+
     /// Pending blocking-hook waiters keyed by request id. The waiter owns
     /// a semaphore plus a slot for the resolved decision; the reply
     /// handler signals the semaphore after filling the slot.
@@ -50,6 +54,39 @@ final class FeedCoordinator: @unchecked Sendable {
         store.expireAbandonedItems()
         for ppid in store.pending.compactMap(\.ppid) {
             armPidWatcher(ppid: ppid)
+        }
+    }
+
+    /// Installs the aimux source's transport so aimux-sourced decisions can be
+    /// routed back to its daemon. Call once at launch alongside `install`.
+    @MainActor
+    func installAimuxTransport(_ transport: AimuxWorkstreamTransport) {
+        self.aimuxTransport = transport
+    }
+
+    /// Routes a Feed decision by source: aimux items POST to the aimux daemon
+    /// (their blocking wait lives there, not in a local hook); every other
+    /// source uses the existing blocking-hook reply path.
+    @MainActor
+    func resolve(itemId: UUID, decision: WorkstreamDecision) {
+        guard let store, let item = store.items.first(where: { $0.id == itemId }) else { return }
+        let requestId = Self.payloadRequestId(item)
+        if item.source == .aimux {
+            store.markResolved(itemId, decision: decision)
+            if let requestId, let transport = aimuxTransport {
+                Task { await transport.respond(requestId: requestId, decision: decision) }
+            }
+        } else {
+            deliverReply(requestId: requestId ?? itemId.uuidString, decision: decision)
+        }
+    }
+
+    private static func payloadRequestId(_ item: WorkstreamItem) -> String? {
+        switch item.payload {
+        case .permissionRequest(let rid, _, _, _): return rid
+        case .exitPlan(let rid, _, _): return rid
+        case .question(let rid, _): return rid
+        default: return nil
         }
     }
 
