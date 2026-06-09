@@ -2,14 +2,22 @@
 
 ## Personal fork notes (read first)
 
-This repo (`TraderSamwise/cmux`) is **sam's personal fork** of [`manaflow-ai/cmux`](https://github.com/manaflow-ai/cmux). The long-lived feature branch is `feature/quick-terminal-pr`. Two things to know before building or merging from upstream:
+This repo (`TraderSamwise/cmux`) is **sam's personal fork** of [`manaflow-ai/cmux`](https://github.com/manaflow-ai/cmux).
+
+**Branch layout:**
+
+- **`sam/main`** is the long-lived, personally-maintained base. It carries the quick-terminal/visor feature and ad-hoc signing, and is kept clean and buildable on any machine by periodically merging `upstream/main` into it. This is the branch to clone and build on a fresh machine. (It was previously named `feature/quick-terminal-pr`, back when it was an upstream PR; it is no longer intended to land upstream.)
+- **Feature branches stack on top of `sam/main`** — e.g. aimux integration work lives on its own branch, never on `sam/main`, so the base stays free of project-specific dependencies and any machine can build `sam/main` standalone.
+
+Two things to know before building or merging from upstream:
 
 ### Quick terminal (visor / quake-mode)
 
 The fork adds a quick-terminal panel implemented in `Sources/QuickTerminalController.swift`. It registers as a `mainWindowContext` just like a regular main window and runs the same `ContentView`. When merging from upstream `main`:
 
-- If a new `@EnvironmentObject` is added to `ContentView` (`Sources/ContentView.swift` ~L1051), mirror the injection in `QuickTerminalController.createQuickTerminalWindow` and pass it through `registerMainWindow(...)`. Otherwise the visor will SIGILL the instant SwiftUI evaluates the body.
+- If a new `@EnvironmentObject` is added to `ContentView` (`Sources/ContentView.swift`, `struct ContentView`), mirror the injection in `QuickTerminalController.createQuickTerminalWindow` and pass it through `registerMainWindow(...)`. Otherwise the visor will SIGILL the instant SwiftUI evaluates the body. Diff the canonical `ContentView(...)` call site in `AppDelegate.createMainWindow` against the visor's call site after every upstream merge — they must match.
 - Current required env objects: `TabManager`, `TerminalNotificationStore`, `SidebarState`, `SidebarSelectionState`, `FileExplorerState`, `CmuxConfigStore`.
+- `ContentView`'s `updateViewModel:` parameter is typed `UpdateStateModel` (from the `CmuxUpdater` package). The visor passes `AppDelegate.shared?.updateViewModel ?? UpdateStateModel()`; if upstream renames that type or changes the init, update the visor call site to match. The main window also injects `.environment(\.settingsRuntime, settingsRuntime)`, which the visor currently omits (nil-safe; visor settings fall back to catalog defaults).
 
 ### Ad-hoc Release signing only
 
@@ -17,7 +25,7 @@ This fork is built only with **ad-hoc signing** — no Apple Developer cert, no 
 
 - `Resources/cmux.entitlements` (added upstream in PR #3027 for auth scaffolding) has been **intentionally deleted**. Do not reintroduce it: `keychain-access-groups` cannot be carried by an ad-hoc signature, and codesign refuses the build with *"entitlements that require signing with a development certificate"*.
 - The Release config's `CODE_SIGN_ENTITLEMENTS` is set to `""` (see `cmux.xcodeproj/project.pbxproj`). Keep it that way.
-- The auth code's `FallbackTokenStore` (`Sources/Auth/AuthManager.swift`) already drops to a file store when keychain writes fail, so dropping the entitlement has no runtime impact for personal use.
+- Auth was extracted upstream into the `CMUXAuthCore` / `CmuxAuthRuntime` packages (`Sources/Auth/AuthManager.swift` no longer exists). Its token store already falls back to a file store when keychain writes fail, so dropping the entitlement has no runtime impact for personal use.
 - Other repo-root entitlement files (`cmux.release.entitlements`, `cmux.nightly.entitlements`, `cmux-helper.entitlements`, `cmux.entitlements`) are consumed only by `scripts/sign-cmux-bundle.sh`, `scripts/build-sign-upload.sh`, and the release/nightly GitHub workflows. They do **not** affect local `xcodebuild` Release builds — leave them alone unless you plan to run those signing scripts.
 
 ### Building on a fresh machine (e.g., the other laptop)
@@ -25,7 +33,7 @@ This fork is built only with **ad-hoc signing** — no Apple Developer cert, no 
 ```bash
 git clone git@github.com:TraderSamwise/cmux.git
 cd cmux
-git checkout feature/quick-terminal-pr
+git checkout sam/main
 ./scripts/setup.sh         # init submodules + build GhosttyKit.xcframework
 ./scripts/reloadp.sh       # build Release and launch (works ad-hoc)
 ```
