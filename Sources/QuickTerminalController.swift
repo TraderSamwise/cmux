@@ -1,5 +1,6 @@
 import AppKit
 import Carbon
+import CmuxUpdater
 import SwiftUI
 
 /// Manages the quick terminal (quake/visor mode) window.
@@ -458,7 +459,7 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
         self.windowId = wId
 
         let root = ContentView(
-            updateViewModel: AppDelegate.shared?.updateViewModel ?? UpdateViewModel(),
+            updateViewModel: AppDelegate.shared?.updateViewModel ?? UpdateStateModel(),
             windowId: wId
         )
         .environmentObject(manager)
