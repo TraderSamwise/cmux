@@ -16,7 +16,7 @@ The fork adds a quick-terminal panel implemented in `Sources/QuickTerminalContro
 This fork is built only with **ad-hoc signing** — no Apple Developer cert, no provisioning profile. To keep that working:
 
 - `Resources/cmux.entitlements` (added upstream in PR #3027 for auth scaffolding) has been **intentionally deleted**. Do not reintroduce it: `keychain-access-groups` cannot be carried by an ad-hoc signature, and codesign refuses the build with *"entitlements that require signing with a development certificate"*.
-- The Release config's `CODE_SIGN_ENTITLEMENTS` is set to `""` (see `GhosttyTabs.xcodeproj/project.pbxproj`). Keep it that way.
+- The Release config's `CODE_SIGN_ENTITLEMENTS` is set to `""` (see `cmux.xcodeproj/project.pbxproj`). Keep it that way.
 - The auth code's `FallbackTokenStore` (`Sources/Auth/AuthManager.swift`) already drops to a file store when keychain writes fail, so dropping the entitlement has no runtime impact for personal use.
 - Other repo-root entitlement files (`cmux.release.entitlements`, `cmux.nightly.entitlements`, `cmux-helper.entitlements`, `cmux.entitlements`) are consumed only by `scripts/sign-cmux-bundle.sh`, `scripts/build-sign-upload.sh`, and the release/nightly GitHub workflows. They do **not** affect local `xcodebuild` Release builds — leave them alone unless you plan to run those signing scripts.
 
@@ -41,11 +41,10 @@ pkill -x cmux; rm -rf /Applications/cmux.app \
 
 (The `find | sort -nr | head -n1` picks the newest Release `cmux.app` from DerivedData — the directory hash is project-path-dependent and will differ across machines.)
 
-If `xcodebuild` fails with *"entitlements that require signing with a development certificate"*, the upstream `Resources/cmux.entitlements` has been re-added by an unintended merge. Check `git status`, delete it, and verify `CODE_SIGN_ENTITLEMENTS = "";` in the Release config of `GhosttyTabs.xcodeproj/project.pbxproj`.
+If `xcodebuild` fails with *"entitlements that require signing with a development certificate"*, the upstream `Resources/cmux.entitlements` has been re-added by an unintended merge. Check `git status`, delete it, and verify `CODE_SIGN_ENTITLEMENTS = "";` in the Release config of `cmux.xcodeproj/project.pbxproj`.
 
 ## Initial setup
 
-Run the setup script to initialize submodules and build GhosttyKit:
 
 ```bash
 ./scripts/setup.sh
@@ -117,7 +116,7 @@ After making code changes, always use `reload.sh --tag` to build. **Never run ba
 If you only need to verify the build compiles (no launch), use a tagged derivedDataPath:
 
 ```bash
-xcodebuild -project GhosttyTabs.xcodeproj -scheme cmux -configuration Debug -destination 'platform=macOS' -derivedDataPath /tmp/cmux-<your-tag> build
+xcodebuild -project cmux.xcodeproj -scheme cmux -configuration Debug -destination 'platform=macOS' -derivedDataPath /tmp/cmux-<your-tag> build
 ```
 
 When rebuilding GhosttyKit.xcframework, always use Release optimizations:
@@ -275,9 +274,12 @@ The app has a **Debug** menu in the macOS menu bar (only in DEBUG builds). Use i
 - **Terminal find layering contract:** `SurfaceSearchOverlay` must be mounted from `GhosttySurfaceScrollView` in `Sources/GhosttyTerminalView.swift` (AppKit portal layer), not from SwiftUI panel containers such as `Sources/Panels/TerminalPanelView.swift`. Portal-hosted terminal views can sit above SwiftUI during split/workspace churn.
 - **Submodule safety:** When modifying a submodule (ghostty, vendor/bonsplit, etc.), always push the submodule commit to its remote `main` branch BEFORE committing the updated pointer in the parent repo. Never commit on a detached HEAD or temporary branch — the commit will be orphaned and lost. Verify with: `cd <submodule> && git merge-base --is-ancestor HEAD origin/main`.
 - **All user-facing strings must be localized.** Use `String(localized: "key.name", defaultValue: "English text")` for every string shown in the UI (labels, buttons, menus, dialogs, tooltips, error messages). Keys go in `Resources/Localizable.xcstrings` with translations for all supported languages (currently English and Japanese). Never use bare string literals in SwiftUI `Text()`, `Button()`, alert titles, etc.
+- **Localization audit is required for every user-facing change.** Before finishing a task that changes UI, Settings rows, menus, shortcut metadata, schema/config text, docs, command/help text, alerts, or tooltips, enumerate the changed user-facing surfaces and verify each one has entries for every supported locale. `defaultValue`, English fallback text, schema descriptions, or copied English strings do not count as localization. For Swift/AppKit strings, update `Resources/Localizable.xcstrings`; for localized web/docs content, update every supported message catalog (currently `web/messages/en.json` and `web/messages/ja.json`) and any localized data structures that carry inline translations. Parse touched localization files, compare changed message keys across locales, and use `rg` over changed Swift/TS/TSX/docs files for newly introduced bare English. The final handoff must state what localization audit was performed or explicitly say what could not be verified.
 - **Shortcut policy:** Every new cmux-owned keyboard shortcut must be added to `KeyboardShortcutSettings`, visible/editable in Settings, supported in `~/.config/cmux/cmux.json`, and documented in the keyboard shortcut and configuration docs.
 - **Snapshot boundary for list subtrees.** In any SwiftUI panel whose `body` contains a `LazyVStack` / `LazyHStack` / `List` / `ForEach` of rows, no view below that boundary may hold a reference to an `ObservableObject` / `@Observable` store (no `@ObservedObject`, `@EnvironmentObject`, `@StateObject`, `@Bindable`, or even a plain `let store: SomeStore` property). Rows and drop-gaps receive immutable value snapshots plus closure action bundles only. Violating this reintroduces the "orthogonal @Published change invalidates every row and thrashes `LazyLayoutViewCache`" class of 100% CPU spin loop that hit the Sessions panel and the workspace sidebar (https://github.com/manaflow-ai/cmux/issues/2586). Reference pattern: `IndexSectionActions` / `SectionGapActions` / `SessionSearchFn` in `Sources/SessionIndexView.swift`.
 - **No state mutation inside view-body computations.** A function called from `body` (directly or through a helper) must not write `@Published` state, schedule a `Task { @MainActor in store.x = … }`, or `DispatchQueue.main.async` a store write. That creates a re-render feedback loop and pegs the main thread (same root-cause family as the snapshot-boundary rule). State-changing work triggered by "new data appeared" belongs in a `reload()` completion, a `didSet`, or a property-observer — never in the projection that feeds `ForEach`.
+- **Foundation, SwiftUI, AttributeGraph, and WebKit semantics change silently between macOS major versions.** A function that "obviously" returns the same value on every macOS is not a reliable assumption. Concrete case from https://github.com/manaflow-ai/cmux/issues/4529: `URL(fileURLWithPath: "/").deletingLastPathComponent().path` returns `"/.."` on macOS 14 and 15 but `"/"` on macOS 26 — Apple silently fixed the underlying CFURL normalization. The repo's `macos-26` CI and every maintainer's dev machine were on the fixed-behavior side; every reporter on the issue was on the broken side. Always test on the reporter's macOS before declaring a user-reported repro disproven. AWS M4 Pro builders (`cmux-aws-mac`, `cmux-aws-m4pro`, `aws-m4pro-1..6`) are pre-provisioned on macOS 15.7.4 and the preferred empirical-repro path; see the `regression-hunt` skill in the cmuxterm-hq sibling repo for the full playbook.
+- **Test files in `cmuxTests/` must be wired into `cmux.xcodeproj/project.pbxproj`.** A `.swift` file added to the worktree without a matching `PBXFileReference` + `PBXSourcesBuildPhase` entry is silently ignored by Xcode and never compiles or runs on CI. Both `xcodebuild test -only-testing:cmuxTests/<TestClass>` and bot reviews pass with "Executed 0 tests" — so the missing wiring is indistinguishable from a clean two-commit red/green regression test until a real user hits the bug. The `workflow-guard-tests` job runs `./scripts/lint-pbxproj-test-wiring.sh` to catch this at PR time; surfaced during the https://github.com/manaflow-ai/cmux/issues/4529 investigation against https://github.com/manaflow-ai/cmux/pull/4536. Add via Xcode (drag the file into the cmuxTests target) or hand-edit the four pbxproj entries; reference any wired sibling like `TabManagerUnitTests.swift` as a template.
 
 ## Test quality policy
 

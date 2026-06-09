@@ -62,14 +62,12 @@ final class MenuBarExtraController: NSObject, NSMenuDelegate {
         super.init()
 
         buildMenu()
+        statusItem.menu = menu
         if let button = statusItem.button {
             button.imagePosition = .imageOnly
             button.imageScaling = .scaleProportionallyDown
             button.image = MenuBarIconRenderer.makeImage(unreadCount: 0)
             button.toolTip = "cmux"
-            button.target = self
-            button.action = #selector(statusItemButtonAction(_:))
-            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
 
         notificationMenuSnapshotCancellable = notificationStore.$notificationMenuSnapshot
@@ -241,21 +239,6 @@ final class MenuBarExtraController: NSObject, NSMenuDelegate {
         onOpenNotification(payload.notification)
     }
 
-    @objc private func statusItemButtonAction(_ sender: NSStatusBarButton) {
-        guard let event = NSApp.currentEvent else {
-            onShowGlobalSearch(sender, nil)
-            return
-        }
-
-        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        if event.type == .rightMouseUp || flags.contains(.control) {
-            refreshUI()
-            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height), in: sender)
-        } else {
-            onShowGlobalSearch(sender, nil)
-        }
-    }
-
     @discardableResult
     func toggleGlobalSearchPalette(onDismiss: (() -> Void)? = nil) -> Bool {
         guard let button = statusItem.button else { return false }
@@ -332,18 +315,19 @@ enum NotificationMenuSnapshotBuilder {
 
     static func make(
         notifications: [TerminalNotification],
+        workspaceUnreadIndicatorCount: Int = 0,
         maxInlineNotificationItems: Int = defaultInlineNotificationLimit
     ) -> NotificationMenuSnapshot {
         let unreadCount = notifications.reduce(into: 0) { count, notification in
             if !notification.isRead {
                 count += 1
             }
-        }
+        } + workspaceUnreadIndicatorCount
 
         let inlineLimit = max(0, maxInlineNotificationItems)
         return NotificationMenuSnapshot(
             unreadCount: unreadCount,
-            hasNotifications: !notifications.isEmpty,
+            hasNotifications: !notifications.isEmpty || workspaceUnreadIndicatorCount > 0,
             recentNotifications: Array(notifications.prefix(inlineLimit))
         )
     }

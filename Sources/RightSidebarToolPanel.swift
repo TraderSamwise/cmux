@@ -91,7 +91,30 @@ final class RightSidebarToolPanel: Panel, ObservableObject {
               let paneId = workspace.bonsplitController.focusedPaneId ?? workspace.bonsplitController.allPaneIds.first else {
             return
         }
-        _ = workspace.openOrFocusFilePreviewSurface(inPane: paneId, filePath: filePath)
+        if workspace.isRemoteWorkspace {
+            let store = fileExplorerStore
+            Task { [weak workspace, weak store] in
+                guard let workspace, let store else { return }
+                do {
+                    let localURL = try await store.materializeRemoteFileForPreview(path: filePath)
+                    _ = workspace.openFileSurfaces(
+                        inPane: paneId,
+                        filePaths: [localURL.path],
+                        focus: true,
+                        reuseExisting: true
+                    )
+                } catch {
+                    NSSound.beep()
+                }
+            }
+            return
+        }
+        _ = workspace.openFileSurfaces(
+            inPane: paneId,
+            filePaths: [filePath],
+            focus: true,
+            reuseExisting: true
+        )
     }
 
     var isFocusedInWorkspace: Bool {
@@ -179,6 +202,7 @@ final class RightSidebarToolPanel: Panel, ObservableObject {
                         sshOptions: configuration.sshOptions
                     ),
                     displayTarget: configuration.displayTarget,
+                    rootPath: workspace.currentDirectory,
                     isAvailable: workspace.remoteConnectionState == .connected,
                     unavailableDetail: unavailableDetail
                 )
@@ -222,11 +246,7 @@ struct RightSidebarToolPanelView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color(nsColor: appearance.backgroundColor))
             .overlay {
-                RoundedRectangle(cornerRadius: FocusFlashPattern.ringCornerRadius)
-                    .stroke(cmuxAccentColor().opacity(focusFlashOpacity), lineWidth: 3)
-                    .shadow(color: cmuxAccentColor().opacity(focusFlashOpacity * 0.35), radius: 10)
-                    .padding(FocusFlashPattern.ringInset)
-                    .allowsHitTesting(false)
+                WorkspaceAttentionFlashRingView(opacity: focusFlashOpacity)
             }
             .simultaneousGesture(TapGesture().onEnded { requestPanelFocusIfNeeded() })
             .onChange(of: panel.focusFlashToken) { _, _ in
