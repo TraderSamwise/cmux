@@ -417,6 +417,9 @@ private struct FeedListView: View {
                 item.kind.isActionable
                     || item.kind == .todos
                     || item.kind == .stop
+                    // aimux read-only permission notices (e.g. Codex, whose
+                    // native TUI owns the decision) are meaningful, not noise.
+                    || (item.source == .aimux && item.kind == .toolUse)
             }
         }
         // Newest first. Status isn't a sort key — resolved items stay
@@ -438,6 +441,9 @@ private struct FeedListView: View {
 
     private func prefersStableSurface(_ snapshot: FeedItemSnapshot) -> Bool {
         snapshot.status.isPending || snapshot.kind == .stop
+            // aimux read-only permission notices (Codex) belong with the active
+            // surface, not buried in history — the user wants to see them now.
+            || (snapshot.source == .aimux && snapshot.kind == .toolUse)
     }
 
     private var shouldShowActivityHistoryLoader: Bool {
@@ -1130,6 +1136,14 @@ struct FeedItemRow: View, Equatable {
     /// absolute path. Matches the Vibe-Island mockup's compact header.
     private func cwdBasename(_ path: String) -> String {
         let trimmed = path.hasSuffix("/") ? String(path.dropLast()) : path
+        // aimux worktree paths (…/<project>/.aimux/worktrees/<worktree>) render
+        // as "project/worktree" so both are visible; everything else is the
+        // last path component.
+        if let r = trimmed.range(of: "/.aimux/worktrees/") {
+            let project = (String(trimmed[..<r.lowerBound]) as NSString).lastPathComponent
+            let worktree = (String(trimmed[r.upperBound...]) as NSString).lastPathComponent
+            if !project.isEmpty, !worktree.isEmpty { return "\(project)/\(worktree)" }
+        }
         let name = (trimmed as NSString).lastPathComponent
         return name.isEmpty ? path : name
     }
@@ -3749,7 +3763,13 @@ private struct TelemetryActionArea: View {
     private var summary: String {
         switch snapshot.payload {
         case .toolUse(let name, let json):
-            return "\(name) \(json)"
+            let preview = PermissionInputPreview(toolName: name, toolInputJSON: json)
+            let primary = preview.primary ?? "\(name) \(json)"
+            let head = preview.sigil.map { "\($0) \(primary)" } ?? primary
+            if let secondary = preview.secondary, !secondary.isEmpty {
+                return "\(head)\n\(secondary)"
+            }
+            return head
         case .toolResult(let name, let json, let err):
             let status = err
                 ? String(localized: "feed.telemetry.error", defaultValue: "error")

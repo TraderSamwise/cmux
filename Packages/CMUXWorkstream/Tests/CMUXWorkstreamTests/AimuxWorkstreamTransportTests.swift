@@ -16,37 +16,26 @@ struct AimuxWorkstreamTransportTests {
         #expect(AimuxWorkstreamTransport.aimuxDecision(for: .question(selections: ["x"])) == nil)
     }
 
-    @Test("builds an actionable aimux permission event")
+    @Test("builds an actionable aimux permission event carrying the real tool input")
     func permissionEvent() {
         let e = AimuxWorkstreamTransport.permissionEvent(
-            sessionId: "s1", requestId: "req-1", toolName: "Bash", summary: "Bash: rm -rf build")
+            sessionId: "s1", requestId: "req-1", toolName: "Bash",
+            toolInputJSON: "{\"command\":\"rm -rf build\"}")
         #expect(e.hookEventName == .permissionRequest)
         #expect(e.source == "aimux")
         #expect(e.requestId == "req-1")
         #expect(e.sessionId == "s1")
         #expect(e.toolName == "Bash")
-        #expect(e.toolInputJSON?.contains("rm -rf build") == true)
-    }
-
-    @Test("derives tool name from a 'Tool: detail' summary when not explicit")
-    func toolNameFromSummary() {
-        let e = AimuxWorkstreamTransport.permissionEvent(
-            sessionId: "s1", requestId: "r", toolName: nil, summary: "Edit: /a/b.ts")
-        #expect(e.toolName == "Edit")
-    }
-
-    @Test("falls back to 'permission' with no tool name or summary")
-    func toolNameFallback() {
-        let e = AimuxWorkstreamTransport.permissionEvent(
-            sessionId: "s1", requestId: "r", toolName: nil, summary: nil)
-        #expect(e.toolName == "permission")
+        // The real tool_input is preserved so the Feed renders the command.
+        #expect(e.toolInputJSON == "{\"command\":\"rm -rf build\"}")
     }
 
     @Test("an aimux event ingests into the store as a pending actionable card")
     func ingestsAsPendingCard() {
         let store = WorkstreamStore(ringCapacity: 10)
         store.ingest(AimuxWorkstreamTransport.permissionEvent(
-            sessionId: "glyde", requestId: "req-9", toolName: "Bash", summary: "Bash: ls"))
+            sessionId: "glyde", requestId: "req-9", toolName: "Bash",
+            toolInputJSON: "{\"command\":\"ls\"}"))
         #expect(store.items.count == 1)
         #expect(store.pending.count == 1)
         let item = store.items[0]

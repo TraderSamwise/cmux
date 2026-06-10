@@ -114,18 +114,18 @@ public actor AimuxWorkstreamTransport: WorkstreamTransport {
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
                     continue
                 }
+                // Dispatch per `data:` line: AsyncBytes.lines does not reliably
+                // yield the blank SSE delimiter, so we can't wait for an empty
+                // line. Each aimux frame is one `event:` + one `data:` line.
                 var eventName = ""
-                var dataBuffer = ""
                 for try await line in bytes.lines {
                     if Task.isCancelled { break }
-                    if line.isEmpty {
-                        handleFrame(event: eventName, data: dataBuffer, endpoint: endpoint)
-                        eventName = ""
-                        dataBuffer = ""
-                    } else if line.hasPrefix("event:") {
+                    if line.hasPrefix("event:") {
                         eventName = String(line.dropFirst("event:".count)).trimmingCharacters(in: .whitespaces)
                     } else if line.hasPrefix("data:") {
-                        dataBuffer += String(line.dropFirst("data:".count)).trimmingCharacters(in: .whitespaces)
+                        let payload = String(line.dropFirst("data:".count)).trimmingCharacters(in: .whitespaces)
+                        handleFrame(event: eventName, data: payload, endpoint: endpoint)
+                        eventName = ""
                     }
                 }
             } catch {
@@ -137,30 +137,85 @@ public actor AimuxWorkstreamTransport: WorkstreamTransport {
     }
 
     private func handleFrame(event: String, data: String, endpoint: Endpoint) {
-        guard let bytes = data.data(using: .utf8) else { return }
         switch event {
         case "ready":
-            guard let ready = try? JSONDecoder().decode(StreamReady.self, from: bytes) else { return }
-            for pending in ready.pending where pending.type == "permission" {
-                emit(sessionId: pending.sessionId, requestId: pending.id,
-                     toolName: pending.payload?.toolName, summary: pending.payload?.summary,
-                     endpoint: endpoint)
-            }
+            // The ready snapshot carries each pending entry's full tool input.
+            guard let d = data.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+                  let pending = obj["pending"] as? [[String: Any]] else { return }
+            for entry in pending { emitEntry(entry, endpoint: endpoint) }
         case "interaction":
-            guard let alert = try? JSONDecoder().decode(InteractionAlert.self, from: bytes),
-                  alert.interaction.type == "permission" else { return }
-            emit(sessionId: alert.sessionId ?? alert.interaction.id, requestId: alert.interaction.id,
-                 toolName: nil, summary: alert.interaction.summary, endpoint: endpoint)
+            let obj = (data.data(using: .utf8)).flatMap {
+                try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
+            }
+            let interaction = obj?["interaction"] as? [String: Any]
+            if (interaction?["telemetry"] as? Bool) == true {
+                // Read-only notice (Codex): render a non-actionable row directly
+                // from the alert — there is no pending entry to fetch.
+                emitTelemetry(
+                    sessionId: (obj?["sessionId"] as? String) ?? (interaction?["id"] as? String) ?? "aimux",
+                    requestId: (interaction?["id"] as? String) ?? UUID().uuidString,
+                    toolName: (interaction?["toolName"] as? String) ?? "permission",
+                    toolInputJSON: (interaction?["toolInputJSON"] as? String) ?? "{}",
+                    cwd: obj?["worktreePath"] as? String
+                )
+            } else {
+                // Actionable: the push carries only a summary; fetch the
+                // authoritative pending list for the full tool input.
+                Task { [weak self] in await self?.fetchAndEmitPending(endpoint) }
+            }
         default:
             break
         }
     }
 
-    private func emit(sessionId: String, requestId: String, toolName: String?, summary: String?, endpoint: Endpoint) {
+    private func fetchAndEmitPending(_ endpoint: Endpoint) async {
+        guard let url = URL(string: "\(endpoint.base)/agents/interaction/pending"),
+              let (d, resp) = try? await session.data(from: url),
+              (resp as? HTTPURLResponse)?.statusCode == 200,
+              let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+              let requests = obj["requests"] as? [[String: Any]] else { return }
+        for entry in requests { emitEntry(entry, endpoint: endpoint) }
+    }
+
+    /// Emits a permission event from a registry entry, preserving the agent's
+    /// real `tool_input` (so cmux renders Bash commands, Edit diffs, etc. as it
+    /// does for native agents) rather than a summary blob.
+    private func emitEntry(_ entry: [String: Any], endpoint: Endpoint) {
+        guard (entry["type"] as? String) == "permission", let id = entry["id"] as? String else { return }
+        let sessionId = (entry["sessionId"] as? String) ?? id
+        let payload = entry["payload"] as? [String: Any]
+        // The agent's working dir (worktree, or project root if none) rides in
+        // the payload; fall back to projectRoot. Drives the project/worktree label.
+        let cwd = (payload?["cwd"] as? String) ?? (entry["projectRoot"] as? String)
+        let toolName = (payload?["toolName"] as? String) ?? "permission"
+        let input = payload?["input"] ?? [String: Any]()
+        let inputJSON = (try? JSONSerialization.data(withJSONObject: input))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        emit(sessionId: sessionId, requestId: id, toolName: toolName, toolInputJSON: inputJSON, cwd: cwd, endpoint: endpoint)
+    }
+
+    private func emit(sessionId: String, requestId: String, toolName: String, toolInputJSON: String, cwd: String?, endpoint: Endpoint) {
         endpointForRequest[requestId] = endpoint
         guard !emittedRequestIds.contains(requestId) else { return }
         emittedRequestIds.insert(requestId)
-        onEvent?(Self.permissionEvent(sessionId: sessionId, requestId: requestId, toolName: toolName, summary: summary))
+        onEvent?(Self.permissionEvent(sessionId: sessionId, requestId: requestId, toolName: toolName, toolInputJSON: toolInputJSON, cwd: cwd))
+    }
+
+    /// Emits a non-actionable read-only row (e.g. Codex permission, whose native
+    /// TUI owns the decision). `.preToolUse` maps to a telemetry `toolUse` item.
+    private func emitTelemetry(sessionId: String, requestId: String, toolName: String, toolInputJSON: String, cwd: String?) {
+        guard !emittedRequestIds.contains(requestId) else { return }
+        emittedRequestIds.insert(requestId)
+        onEvent?(WorkstreamEvent(
+            sessionId: sessionId,
+            hookEventName: .preToolUse,
+            source: WorkstreamSource.aimux.rawValue,
+            cwd: cwd,
+            toolName: toolName,
+            toolInputJSON: toolInputJSON,
+            requestId: requestId
+        ))
     }
 
     // MARK: Pure mappers (unit-tested)
@@ -180,27 +235,18 @@ public actor AimuxWorkstreamTransport: WorkstreamTransport {
         }
     }
 
-    /// Builds an actionable permission `WorkstreamEvent` from aimux fields.
-    /// `toolName` falls back to the prefix of "Tool: detail" summaries.
-    static func permissionEvent(sessionId: String, requestId: String, toolName: String?, summary: String?) -> WorkstreamEvent {
-        let resolvedTool = toolName
-            ?? summary.flatMap { $0.split(separator: ":", maxSplits: 1).first.map { String($0).trimmingCharacters(in: .whitespaces) } }
-            ?? "permission"
-        let detail = summary ?? resolvedTool
-        return WorkstreamEvent(
+    /// Builds an actionable permission `WorkstreamEvent`, carrying the agent's
+    /// real `tool_input` JSON so the Feed renders it like a native agent's card.
+    static func permissionEvent(sessionId: String, requestId: String, toolName: String, toolInputJSON: String, cwd: String? = nil) -> WorkstreamEvent {
+        WorkstreamEvent(
             sessionId: sessionId,
             hookEventName: .permissionRequest,
             source: WorkstreamSource.aimux.rawValue,
-            toolName: resolvedTool,
-            toolInputJSON: "{\"summary\":\(jsonStringLiteral(detail))}",
+            cwd: cwd,
+            toolName: toolName,
+            toolInputJSON: toolInputJSON,
             requestId: requestId
         )
-    }
-
-    private static func jsonStringLiteral(_ s: String) -> String {
-        guard let data = try? JSONSerialization.data(withJSONObject: s, options: .fragmentsAllowed),
-              let str = String(data: data, encoding: .utf8) else { return "\"\"" }
-        return str
     }
 
     // MARK: Wire DTOs
@@ -217,29 +263,4 @@ public actor AimuxWorkstreamTransport: WorkstreamTransport {
     }
 
     struct EndpointDTO: Decodable { let host: String; let port: Int }
-
-    private struct StreamReady: Decodable { let pending: [PendingInteraction] }
-
-    private struct PendingInteraction: Decodable {
-        let id: String
-        let sessionId: String
-        let type: String?
-        let payload: PendingPayload?
-    }
-
-    private struct PendingPayload: Decodable {
-        let toolName: String?
-        let summary: String?
-    }
-
-    private struct InteractionAlert: Decodable {
-        let sessionId: String?
-        let interaction: AlertInteraction
-    }
-
-    private struct AlertInteraction: Decodable {
-        let id: String
-        let type: String?
-        let summary: String?
-    }
 }
