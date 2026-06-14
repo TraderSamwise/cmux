@@ -1,11 +1,12 @@
 import Foundation
 
-/// Streams aimux-managed agents' permission interactions into the Feed and
+/// Streams aimux-managed agents' interactions into the Feed and
 /// routes decisions back to the aimux daemon over HTTP.
 ///
 /// Inbound: polls the aimux daemon `/projects`, opens an SSE
 /// `/agents/interaction/stream` per live project service, and emits a
-/// `WorkstreamEvent` (`source = aimux`, `hookEventName = .permissionRequest`)
+/// `WorkstreamEvent` (`source = aimux`, `hookEventName = .permissionRequest`
+/// or `.askUserQuestion`)
 /// for each pending interaction. Outbound: `respond(requestId:decision:)`
 /// POSTs to that project's `/agents/interaction/respond`. cmux's own
 /// hook-sourced items are unaffected — they never flow through a transport.
@@ -57,14 +58,14 @@ public actor AimuxWorkstreamTransport: WorkstreamTransport {
     /// POST the user's decision to the aimux project that owns `requestId`.
     public func respond(requestId: String, decision: WorkstreamDecision) async {
         guard let endpoint = endpointForRequest[requestId],
-              let value = Self.aimuxDecision(for: decision),
+              let response = Self.aimuxResponse(for: decision),
               let url = URL(string: "\(endpoint.base)/agents/interaction/respond")
         else { return }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "content-type")
         req.httpBody = try? JSONSerialization.data(
-            withJSONObject: ["id": requestId, "response": ["decision": value]]
+            withJSONObject: ["id": requestId, "response": response]
         )
         _ = try? await session.data(for: req)
         endpointForRequest[requestId] = nil
@@ -178,20 +179,33 @@ public actor AimuxWorkstreamTransport: WorkstreamTransport {
         for entry in requests { emitEntry(entry, endpoint: endpoint) }
     }
 
-    /// Emits a permission event from a registry entry, preserving the agent's
+    /// Emits a feed event from a registry entry, preserving the agent's
     /// real `tool_input` (so cmux renders Bash commands, Edit diffs, etc. as it
     /// does for native agents) rather than a summary blob.
     private func emitEntry(_ entry: [String: Any], endpoint: Endpoint) {
-        guard (entry["type"] as? String) == "permission", let id = entry["id"] as? String else { return }
+        guard let id = entry["id"] as? String else { return }
+        let type = entry["type"] as? String
         let sessionId = (entry["sessionId"] as? String) ?? id
         let payload = entry["payload"] as? [String: Any]
         // The agent's working dir (worktree, or project root if none) rides in
         // the payload; fall back to projectRoot. Drives the project/worktree label.
         let cwd = (payload?["cwd"] as? String) ?? (entry["projectRoot"] as? String)
+
+        if type == "question" {
+            let inputJSON = Self.questionToolInputJSON(payload: payload, entry: entry) ?? "{}"
+            emitQuestion(sessionId: sessionId, requestId: id, toolInputJSON: inputJSON, cwd: cwd, endpoint: endpoint)
+            return
+        }
+
+        guard type == "permission" else { return }
         let toolName = (payload?["toolName"] as? String) ?? "permission"
         let input = payload?["input"] ?? [String: Any]()
-        let inputJSON = (try? JSONSerialization.data(withJSONObject: input))
-            .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        let inputJSON = Self.jsonString(from: input) ?? "{}"
+        if Self.isAskUserQuestion(toolName: toolName),
+           let questionJSON = Self.questionToolInputJSON(payload: payload, entry: entry) {
+            emitQuestion(sessionId: sessionId, requestId: id, toolInputJSON: questionJSON, cwd: cwd, endpoint: endpoint)
+            return
+        }
         emit(sessionId: sessionId, requestId: id, toolName: toolName, toolInputJSON: inputJSON, cwd: cwd, endpoint: endpoint)
     }
 
@@ -200,6 +214,13 @@ public actor AimuxWorkstreamTransport: WorkstreamTransport {
         guard !emittedRequestIds.contains(requestId) else { return }
         emittedRequestIds.insert(requestId)
         onEvent?(Self.permissionEvent(sessionId: sessionId, requestId: requestId, toolName: toolName, toolInputJSON: toolInputJSON, cwd: cwd))
+    }
+
+    private func emitQuestion(sessionId: String, requestId: String, toolInputJSON: String, cwd: String?, endpoint: Endpoint) {
+        endpointForRequest[requestId] = endpoint
+        guard !emittedRequestIds.contains(requestId) else { return }
+        emittedRequestIds.insert(requestId)
+        onEvent?(Self.questionEvent(sessionId: sessionId, requestId: requestId, toolInputJSON: toolInputJSON, cwd: cwd))
     }
 
     /// Emits a non-actionable read-only row (e.g. Codex permission, whose native
@@ -221,7 +242,7 @@ public actor AimuxWorkstreamTransport: WorkstreamTransport {
     // MARK: Pure mappers (unit-tested)
 
     /// Maps a Feed decision to aimux's response decision string, or nil for
-    /// interaction types aimux doesn't model yet (exit-plan/question).
+    /// interaction types that are not permission decisions.
     static func aimuxDecision(for decision: WorkstreamDecision) -> String? {
         switch decision {
         case .permission(let mode):
@@ -231,6 +252,19 @@ public actor AimuxWorkstreamTransport: WorkstreamTransport {
             case .deny: return "deny"
             }
         case .exitPlan, .question:
+            return nil
+        }
+    }
+
+    /// Maps a Feed decision to the full aimux interaction response object.
+    static func aimuxResponse(for decision: WorkstreamDecision) -> [String: Any]? {
+        switch decision {
+        case .permission:
+            guard let value = aimuxDecision(for: decision) else { return nil }
+            return ["decision": value]
+        case .question(let selections):
+            return ["selection": selections]
+        case .exitPlan:
             return nil
         }
     }
@@ -247,6 +281,72 @@ public actor AimuxWorkstreamTransport: WorkstreamTransport {
             toolInputJSON: toolInputJSON,
             requestId: requestId
         )
+    }
+
+    /// Builds an actionable question `WorkstreamEvent` for AskUserQuestion.
+    static func questionEvent(sessionId: String, requestId: String, toolInputJSON: String, cwd: String? = nil) -> WorkstreamEvent {
+        WorkstreamEvent(
+            sessionId: sessionId,
+            hookEventName: .askUserQuestion,
+            source: WorkstreamSource.aimux.rawValue,
+            cwd: cwd,
+            toolName: "AskUserQuestion",
+            toolInputJSON: toolInputJSON,
+            requestId: requestId
+        )
+    }
+
+    private static func isAskUserQuestion(toolName: String) -> Bool {
+        toolName.caseInsensitiveCompare("AskUserQuestion") == .orderedSame
+    }
+
+    private static func questionToolInputJSON(payload: [String: Any]?, entry: [String: Any]) -> String? {
+        if let input = payload?["input"] {
+            if let inputJSON = stringIfQuestionPayload(input) {
+                return inputJSON
+            }
+        }
+        if let payload, let payloadJSON = stringIfQuestionPayload(payload) {
+            return payloadJSON
+        }
+        if let summary = entry["summary"] as? String, let summaryJSON = stringIfQuestionPayload(summary) {
+            return summaryJSON
+        }
+        return nil
+    }
+
+    private static func stringIfQuestionPayload(_ value: Any) -> String? {
+        if let text = value as? String {
+            guard let object = jsonObject(from: text), hasQuestionShape(object) else { return nil }
+            return text
+        }
+        guard hasQuestionShape(value) else { return nil }
+        return jsonString(from: value)
+    }
+
+    private static func hasQuestionShape(_ value: Any) -> Bool {
+        guard let dict = value as? [String: Any] else { return false }
+        if dict["question"] is String || dict["prompt"] is String {
+            return true
+        }
+        if let questions = dict["questions"] as? [[String: Any]], !questions.isEmpty {
+            return true
+        }
+        return false
+    }
+
+    private static func jsonObject(from text: String) -> Any? {
+        guard let data = text.data(using: .utf8) else { return nil }
+        return try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
+    }
+
+    private static func jsonString(from value: Any) -> String? {
+        if let text = value as? String {
+            return text
+        }
+        guard JSONSerialization.isValidJSONObject(value) else { return nil }
+        return (try? JSONSerialization.data(withJSONObject: value))
+            .flatMap { String(data: $0, encoding: .utf8) }
     }
 
     // MARK: Wire DTOs
