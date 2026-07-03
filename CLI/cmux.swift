@@ -28717,6 +28717,11 @@ export default function cmuxPiSessionExtension(pi: ExtensionAPI) {
                     )
                     setIdleStatusUnlessAnotherSessionIsRunning(workspaceId: workspaceId, surfaceId: surfaceId)
                 }
+                // Signal cache keepalive regardless of lifecycle value reported above.
+                _ = try? sendV1Command(
+                    "cache_keepalive_turn_complete --tab=\(workspaceId)\(socketPanelOption(surfaceId))",
+                    client: client
+                )
             }
 
         case .approvalResponse:

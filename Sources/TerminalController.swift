@@ -1582,6 +1582,9 @@ class TerminalController {
         case "set_agent_lifecycle":
             return setAgentLifecycle(args)
 
+        case "cache_keepalive_turn_complete":
+            return cacheKeepaliveTurnComplete(args)
+
         case "agent_hibernation":
             return agentHibernation(args)
 
@@ -19549,6 +19552,31 @@ class TerminalController {
             }
             tab.setAgentLifecycle(key: key, panelId: panelResolution.panelId, lifecycle: lifecycle)
         }
+        return "OK"
+    }
+
+    /// Signal that a Claude turn completed (Stop hook fired). Starts the cache keepalive timer.
+    /// Usage: cache_keepalive_turn_complete [--tab=<id>] [--panel=<id>]
+    private func cacheKeepaliveTurnComplete(_ args: String) -> String {
+        let parsed = parseOptions(args)
+        let targetResolution = parseSidebarMutationTabTarget(options: parsed.options)
+        guard let target = targetResolution.target else {
+            return targetResolution.error ?? "ERROR: No tab selected"
+        }
+        let usage = "cache_keepalive_turn_complete [--tab=<id>] [--panel=<id>]"
+        let panelResolution = parseOptionalPanelIdOption(options: parsed.options, usage: usage)
+        if let error = panelResolution.error {
+            return error
+        }
+        guard let tab = resolveSidebarMutationTab(target) else {
+            return "ERROR: Tab not found"
+        }
+        let panelId = panelResolution.panelId ?? tab.focusedPanelId ?? tab.panels.keys.first
+        guard let panelId else { return "ERROR: No panel" }
+        CacheKeepaliveController.shared.handleTurnCompleted(
+            workspaceId: tab.id,
+            panelId: panelId
+        )
         return "OK"
     }
 

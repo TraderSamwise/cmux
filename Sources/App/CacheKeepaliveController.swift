@@ -30,16 +30,11 @@ enum CacheKeepaliveSettings {
 // MARK: - Controller
 
 /// Keeps Claude Code's prompt cache warm by injecting keepalive pings into idle sessions,
-/// then compacts before the cache TTL expires. Driven by agent lifecycle events from cmux's
-/// Claude wrapper hooks.
+/// then compacts when pings are exhausted.
 ///
-/// Flow:
-/// 1. Agent goes idle → timer starts (idleSeconds, default 240s)
-/// 2. Timer fires → check eligibility (transcript > minTranscriptBytes) → inject ping message
-/// 3. Claude responds → idle → repeat up to maxPings times
-/// 4. After maxPings → inject /compact
-/// 5. After compact → transcript drops below threshold → naturally stops
-/// 6. User works conversation back above threshold → cycle restarts
+/// Triggered by a dedicated `cache_keepalive_turn_complete` socket command sent from the
+/// CLI's Stop hook handler — not by lifecycle values (which conflate "started working" with
+/// "finished with background shell"). Following aimux's model: Stop fired = turn done = idle.
 @MainActor
 final class CacheKeepaliveController {
     static let shared = CacheKeepaliveController()
@@ -54,34 +49,19 @@ final class CacheKeepaliveController {
 
     private init() {}
 
-    /// Called when an agent lifecycle changes. Starts or cancels the keepalive timer.
-    func handleLifecycleChange(
-        workspaceId: UUID,
-        panelId: UUID,
-        lifecycle: AgentHibernationLifecycleState
-    ) {
+    /// Called when Claude completes a turn (Stop hook fired). This is the unambiguous
+    /// "agent is done" signal — no lifecycle inference needed.
+    func handleTurnCompleted(workspaceId: UUID, panelId: UUID) {
         guard CacheKeepaliveSettings.isEnabled() else { return }
         let key = AgentHibernationPanelKey(workspaceId: workspaceId, panelId: panelId)
 
-        if lifecycle == .idle {
-            scheduleAction(key: key)
-        } else if lifecycle == .running {
-            cancelAction(key: key)
-            // If running transition wasn't caused by our injection, reset ping counter
-            if let lastInjection = lastInjectionByPanel[key],
-               Date().timeIntervalSince1970 - lastInjection > 5.0 {
-                pingCountByPanel.removeValue(forKey: key)
-            }
-        } else {
-            cancelAction(key: key)
+        // Reset ping counter if this is a real user turn (>5s since our last injection)
+        if let lastInjection = lastInjectionByPanel[key],
+           Date().timeIntervalSince1970 - lastInjection > 5.0 {
+            pingCountByPanel.removeValue(forKey: key)
         }
-    }
 
-    /// Called when the user types in a terminal. Not used for cancellation (we always inject
-    /// regardless of draft state), but tracked for diagnostics.
-    func handleTerminalInput(workspaceId: UUID, panelId: UUID) {
-        // No-op: we inject regardless of user drafting state.
-        // The timer is anchored to last API call (idle event), not keystrokes.
+        scheduleAction(key: key)
     }
 
     private func scheduleAction(key: AgentHibernationPanelKey) {
@@ -109,22 +89,13 @@ final class CacheKeepaliveController {
 
         guard let appDelegate = AppDelegate.shared else { return }
 
-        guard let (workspace, terminalPanel) = appDelegate.findTerminalPanel(
+        guard let (_, terminalPanel) = appDelegate.findTerminalPanel(
             workspaceId: key.workspaceId,
             panelId: key.panelId
         ) else { return }
 
-        // Verify still idle
-        let lifecycle = workspace.agentHibernationLifecycleState(
-            panelId: key.panelId,
-            fallback: nil
-        )
-        guard lifecycle == .idle else { return }
-
         // Check transcript eligibility
-        let eligible = transcriptExceedsThreshold(workspaceId: key.workspaceId, panelId: key.panelId)
-        guard eligible else {
-            // Below threshold — reset counter (conversation may have been compacted)
+        guard transcriptExceedsThreshold(workspaceId: key.workspaceId, panelId: key.panelId) else {
             pingCountByPanel.removeValue(forKey: key)
             return
         }
@@ -135,12 +106,10 @@ final class CacheKeepaliveController {
         lastInjectionByPanel[key] = Date().timeIntervalSince1970
 
         if count >= maxPings {
-            // Exhausted pings — compact
             logger.info("injecting /compact (after \(count) pings)")
             terminalPanel.sendInput("/compact\n")
             pingCountByPanel.removeValue(forKey: key)
         } else {
-            // Send keepalive ping
             let message = CacheKeepaliveSettings.pingMessage()
             logger.info("injecting ping \(count + 1)/\(maxPings)")
             terminalPanel.sendInput(message + "\n")
@@ -148,20 +117,16 @@ final class CacheKeepaliveController {
         }
     }
 
+    // MARK: - Transcript threshold
+
     private func transcriptExceedsThreshold(workspaceId: UUID, panelId: UUID) -> Bool {
         let bytesNeeded = CacheKeepaliveSettings.minTranscriptBytes()
-
         guard let path = transcriptPath(workspaceId: workspaceId, panelId: panelId) else {
             return false
         }
-
-        let bytesSinceCompact = measureBytesSinceLastCompact(path: path)
-        let result = bytesSinceCompact >= bytesNeeded
-        logger.info("threshold check: \(bytesSinceCompact) bytes vs \(bytesNeeded) needed → \(result)")
-        return result
+        return measureBytesSinceLastCompact(path: path) >= bytesNeeded
     }
 
-    /// Reads the cmux hook-sessions file to find the transcript path for a workspace/panel.
     private func transcriptPath(workspaceId: UUID, panelId: UUID) -> String? {
         let hookSessionsPath = (NSHomeDirectory() as NSString)
             .appendingPathComponent(".cmuxterm/claude-hook-sessions.json")
@@ -173,31 +138,29 @@ final class CacheKeepaliveController {
             return nil
         }
 
-        // Look up by workspace ID (case-insensitive UUID match)
-        let wsKey = activeByWorkspace.keys.first { $0.caseInsensitiveCompare(workspaceId.uuidString) == .orderedSame }
+        let wsKey = activeByWorkspace.keys.first {
+            $0.caseInsensitiveCompare(workspaceId.uuidString) == .orderedSame
+        }
         guard let wsKey,
               let wsEntry = activeByWorkspace[wsKey] as? [String: Any],
               let sessionId = wsEntry["sessionId"] as? String,
               let session = sessions[sessionId] as? [String: Any],
-              let transcriptPath = session["transcriptPath"] as? String,
-              FileManager.default.fileExists(atPath: transcriptPath) else {
+              let path = session["transcriptPath"] as? String,
+              FileManager.default.fileExists(atPath: path) else {
             return nil
         }
 
-        return transcriptPath
+        return path
     }
 
     private func measureBytesSinceLastCompact(path: String) -> Int {
-        let fm = FileManager.default
-
-        guard let attrs = try? fm.attributesOfItem(atPath: path),
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
               let fileSize = (attrs[.size] as? NSNumber)?.intValue,
               fileSize > 0 else { return 0 }
 
         guard let handle = FileHandle(forReadingAtPath: path) else { return fileSize }
         defer { handle.closeFile() }
 
-        // Read last 4MB to find the most recent compact_boundary
         let searchSize = min(fileSize, 4 * 1024 * 1024)
         let searchOffset = fileSize - searchSize
         handle.seek(toFileOffset: UInt64(searchOffset))
