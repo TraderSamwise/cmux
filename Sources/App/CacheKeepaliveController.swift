@@ -149,31 +149,46 @@ final class CacheKeepaliveController {
     }
 
     private func transcriptExceedsThreshold(workspaceId: UUID, panelId: UUID) -> Bool {
-        guard let snapshot = SharedLiveAgentIndex.shared.snapshot(workspaceId: workspaceId, panelId: panelId),
-              !snapshot.sessionId.isEmpty else {
+        let bytesNeeded = CacheKeepaliveSettings.minTranscriptBytes()
+
+        guard let path = transcriptPath(workspaceId: workspaceId, panelId: panelId) else {
             return false
         }
 
-        let bytesNeeded = CacheKeepaliveSettings.minTranscriptBytes()
-        let bytesSinceCompact = measureBytesSinceLastCompact(sessionId: snapshot.sessionId)
-        return bytesSinceCompact >= bytesNeeded
+        let bytesSinceCompact = measureBytesSinceLastCompact(path: path)
+        let result = bytesSinceCompact >= bytesNeeded
+        logger.info("threshold check: \(bytesSinceCompact) bytes vs \(bytesNeeded) needed → \(result)")
+        return result
     }
 
-    private func measureBytesSinceLastCompact(sessionId: String) -> Int {
-        let fm = FileManager.default
-        let projectsDir = (NSHomeDirectory() as NSString).appendingPathComponent(".claude/projects")
+    /// Reads the cmux hook-sessions file to find the transcript path for a workspace/panel.
+    private func transcriptPath(workspaceId: UUID, panelId: UUID) -> String? {
+        let hookSessionsPath = (NSHomeDirectory() as NSString)
+            .appendingPathComponent(".cmuxterm/claude-hook-sessions.json")
 
-        guard let subdirs = try? fm.contentsOfDirectory(atPath: projectsDir) else { return 0 }
-
-        var transcriptPath: String?
-        for subdir in subdirs {
-            let candidate = "\(projectsDir)/\(subdir)/\(sessionId).jsonl"
-            if fm.fileExists(atPath: candidate) {
-                transcriptPath = candidate
-                break
-            }
+        guard let data = FileManager.default.contents(atPath: hookSessionsPath),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let activeByWorkspace = json["activeSessionsByWorkspace"] as? [String: Any],
+              let sessions = json["sessions"] as? [String: Any] else {
+            return nil
         }
-        guard let path = transcriptPath else { return 0 }
+
+        // Look up by workspace ID (case-insensitive UUID match)
+        let wsKey = activeByWorkspace.keys.first { $0.caseInsensitiveCompare(workspaceId.uuidString) == .orderedSame }
+        guard let wsKey,
+              let wsEntry = activeByWorkspace[wsKey] as? [String: Any],
+              let sessionId = wsEntry["sessionId"] as? String,
+              let session = sessions[sessionId] as? [String: Any],
+              let transcriptPath = session["transcriptPath"] as? String,
+              FileManager.default.fileExists(atPath: transcriptPath) else {
+            return nil
+        }
+
+        return transcriptPath
+    }
+
+    private func measureBytesSinceLastCompact(path: String) -> Int {
+        let fm = FileManager.default
 
         guard let attrs = try? fm.attributesOfItem(atPath: path),
               let fileSize = (attrs[.size] as? NSNumber)?.intValue,
