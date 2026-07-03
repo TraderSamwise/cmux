@@ -154,19 +154,47 @@ final class CacheKeepaliveController {
             return false
         }
 
-        let stateDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude")
-            .appendingPathComponent("cache-keepalive")
-            .appendingPathComponent(snapshot.sessionId)
+        let bytesNeeded = CacheKeepaliveSettings.minTranscriptBytes()
+        let bytesSinceCompact = measureBytesSinceLastCompact(sessionId: snapshot.sessionId)
+        return bytesSinceCompact >= bytesNeeded
+    }
 
-        let eligibleFile = stateDir.appendingPathComponent("eligible")
+    private func measureBytesSinceLastCompact(sessionId: String) -> Int {
+        let fm = FileManager.default
+        let projectsDir = (NSHomeDirectory() as NSString).appendingPathComponent(".claude/projects")
 
-        guard let content = try? String(contentsOf: eligibleFile, encoding: .utf8)
-            .trimmingCharacters(in: .whitespacesAndNewlines) else {
-            return false
+        guard let subdirs = try? fm.contentsOfDirectory(atPath: projectsDir) else { return 0 }
+
+        var transcriptPath: String?
+        for subdir in subdirs {
+            let candidate = "\(projectsDir)/\(subdir)/\(sessionId).jsonl"
+            if fm.fileExists(atPath: candidate) {
+                transcriptPath = candidate
+                break
+            }
+        }
+        guard let path = transcriptPath else { return 0 }
+
+        guard let attrs = try? fm.attributesOfItem(atPath: path),
+              let fileSize = (attrs[.size] as? NSNumber)?.intValue,
+              fileSize > 0 else { return 0 }
+
+        guard let handle = FileHandle(forReadingAtPath: path) else { return fileSize }
+        defer { handle.closeFile() }
+
+        // Read last 4MB to find the most recent compact_boundary
+        let searchSize = min(fileSize, 4 * 1024 * 1024)
+        let searchOffset = fileSize - searchSize
+        handle.seek(toFileOffset: UInt64(searchOffset))
+        let chunk = handle.readData(ofLength: searchSize)
+
+        guard let needle = "compact_boundary".data(using: .utf8) else { return fileSize }
+
+        if let range = chunk.range(of: needle, options: .backwards) {
+            return fileSize - (searchOffset + range.lowerBound)
         }
 
-        return content == "1"
+        return fileSize
     }
 }
 
