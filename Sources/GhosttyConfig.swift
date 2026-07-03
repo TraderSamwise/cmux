@@ -38,6 +38,13 @@ struct GhosttyConfig {
     var quickTerminalAnimationDuration: Double?
     var quickTerminalScreenFraction: Double?
 
+    // Cache keepalive settings
+    var cacheKeepaliveEnabled: Bool = false
+    var cacheKeepaliveIdleSeconds: Double = 240
+    var cacheKeepaliveMinTranscriptBytes: Int = 768_000
+    var cacheKeepaliveMaxPings: Int = 7
+    var cacheKeepalivePingMessage: String = "[cache keepalive ping - no action needed, respond with a single period]"
+
     // Colors (from theme or config)
     var backgroundColor: NSColor = NSColor(hex: "#272822")!
     var hasBackgroundColorDirective = false
@@ -540,6 +547,22 @@ struct GhosttyConfig {
                     if let frac = Double(value) {
                         quickTerminalScreenFraction = frac
                     }
+                case "cache-keepalive-enabled":
+                    cacheKeepaliveEnabled = value == "true"
+                case "cache-keepalive-idle-seconds":
+                    if let secs = Double(value) {
+                        cacheKeepaliveIdleSeconds = min(max(secs, 30), 280)
+                    }
+                case "cache-keepalive-min-transcript-bytes":
+                    if let bytes = Int(value) {
+                        cacheKeepaliveMinTranscriptBytes = max(bytes, 1024)
+                    }
+                case "cache-keepalive-max-pings":
+                    if let pings = Int(value) {
+                        cacheKeepaliveMaxPings = max(pings, 0)
+                    }
+                case "cache-keepalive-ping-message":
+                    cacheKeepalivePingMessage = value
                 default:
                     break
                 }

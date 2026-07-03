@@ -12521,6 +12521,11 @@ final class Workspace: Identifiable, ObservableObject {
         guard let targetPanelId, panels[targetPanelId] != nil else { return }
         agentLifecycleStatesByPanelId[targetPanelId, default: [:]][key] = lifecycle
         recordAgentLifecycleChange(panelId: targetPanelId)
+        CacheKeepaliveController.shared.handleLifecycleChange(
+            workspaceId: id,
+            panelId: targetPanelId,
+            lifecycle: lifecycle
+        )
     }
 
     @discardableResult
