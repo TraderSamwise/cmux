@@ -21734,12 +21734,20 @@ struct CMUXCLI {
                     telemetry: telemetry
                 ) else {
                     telemetry.breadcrumb("claude-hook.stop.stale")
+                    _ = try? sendV1Command(
+                        "cache_keepalive_turn_complete --tab=\(workspaceId)\(socketPanelOption(surfaceId))",
+                        client: client
+                    )
                     print("OK")
                     return
                 }
 
                 guard !suppressVisibleMutations else {
                     telemetry.breadcrumb("claude-hook.stop.nested-suppressed")
+                    _ = try? sendV1Command(
+                        "cache_keepalive_turn_complete --tab=\(workspaceId)\(socketPanelOption(surfaceId))",
+                        client: client
+                    )
                     print("OK")
                     return
                 }
@@ -21798,6 +21806,10 @@ struct CMUXCLI {
                     let payload = notificationPayload(title: title, subtitle: completion.subtitle, body: completion.body)
                     _ = try? sendV1Command("notify_target_async \(workspaceId) \(surfaceId) \(payload)", client: client)
                 }
+                _ = try? sendV1Command(
+                    "cache_keepalive_turn_complete --tab=\(workspaceId)\(socketPanelOption(surfaceId))",
+                    client: client
+                )
                 print("OK")
             } catch {
                 if shouldIgnoreClaudeHookTeardownError(error) {
