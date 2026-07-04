@@ -19558,9 +19558,11 @@ class TerminalController {
     /// Signal that a Claude turn completed (Stop hook fired). Starts the cache keepalive timer.
     /// Usage: cache_keepalive_turn_complete [--tab=<id>] [--panel=<id>]
     private func cacheKeepaliveTurnComplete(_ args: String) -> String {
+        CacheKeepaliveController.shared.debugLog("socket cmd args=\(args.prefix(80))")
         let parsed = parseOptions(args)
         let targetResolution = parseSidebarMutationTabTarget(options: parsed.options)
         guard let target = targetResolution.target else {
+            CacheKeepaliveController.shared.debugLog("socket cmd FAILED: \(targetResolution.error ?? "no tab")")
             return targetResolution.error ?? "ERROR: No tab selected"
         }
         let usage = "cache_keepalive_turn_complete [--tab=<id>] [--panel=<id>]"
@@ -19569,10 +19571,14 @@ class TerminalController {
             return error
         }
         guard let tab = resolveSidebarMutationTab(target) else {
+            CacheKeepaliveController.shared.debugLog("socket cmd FAILED: tab not found")
             return "ERROR: Tab not found"
         }
         let panelId = panelResolution.panelId ?? tab.focusedPanelId ?? tab.panels.keys.first
-        guard let panelId else { return "ERROR: No panel" }
+        guard let panelId else {
+            CacheKeepaliveController.shared.debugLog("socket cmd FAILED: no panel")
+            return "ERROR: No panel"
+        }
         CacheKeepaliveController.shared.handleTurnCompleted(
             workspaceId: tab.id,
             panelId: panelId
