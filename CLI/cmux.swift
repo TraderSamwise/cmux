@@ -23024,6 +23024,8 @@ struct CMUXCLI {
         }()
 
         if let assistantMessage = claudeAssistantMessageFromHookPayload(parsedInput.object) {
+            // Suppress notification for keepalive ping acks
+            if assistantMessage.trimmingCharacters(in: .whitespacesAndNewlines) == "." { return nil }
             return (completedSubtitle, truncate(assistantMessage, maxLength: 200))
         }
 
@@ -23031,6 +23033,7 @@ struct CMUXCLI {
         let transcript = transcriptPath.flatMap { readTranscriptSummary(path: $0) }
 
         if let lastMsg = transcript?.lastAssistantMessage {
+            if lastMsg.trimmingCharacters(in: .whitespacesAndNewlines) == "." { return nil }
             return (completedSubtitle, truncate(lastMsg, maxLength: 200))
         }
 
