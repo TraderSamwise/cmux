@@ -107,22 +107,23 @@ final class CacheKeepaliveController {
 
         guard let appDelegate = AppDelegate.shared else { return }
 
-        guard let (workspace, terminalPanel) = appDelegate.findTerminalPanel(
+        guard let (_, terminalPanel) = appDelegate.findTerminalPanel(
             workspaceId: key.workspaceId,
             panelId: key.panelId
         ) else { return }
 
-        // Don't inject if agent is actively running
-        let lifecycle = workspace.agentHibernationLifecycleState(panelId: key.panelId, fallback: nil)
-        guard lifecycle == .idle else {
-            debugLog("fireAction: agent not idle (lifecycle=\(lifecycle.rawValue)), rescheduling")
+        // Don't inject if agent is mid-turn (transcript-based, same as aimux)
+        guard isAgentIdle(workspaceId: key.workspaceId, panelId: key.panelId) else {
+            debugLog("fireAction: agent mid-turn, rescheduling")
             scheduleAction(key: key)
             return
         }
 
         // Check transcript eligibility
-        guard transcriptExceedsThreshold(workspaceId: key.workspaceId, panelId: key.panelId) else {
-            debugLog("fireAction: transcript below threshold, skipping")
+        let transcriptBytes = measureTranscriptBytes(workspaceId: key.workspaceId, panelId: key.panelId)
+        let bytesNeeded = CacheKeepaliveSettings.minTranscriptBytes()
+        guard transcriptBytes >= bytesNeeded else {
+            debugLog("fireAction: transcript \(transcriptBytes) < threshold \(bytesNeeded), skipping")
             pingCountByPanel.removeValue(forKey: key)
             return
         }
@@ -141,6 +142,57 @@ final class CacheKeepaliveController {
             terminalPanel.sendInput(message + "\n")
             pingCountByPanel[key] = count + 1
         }
+    }
+
+    // MARK: - Turn state (transcript-based, aimux model)
+
+    /// Reads the transcript tail to determine if the agent is idle.
+    /// Idle = last assistant record has stop_reason "end_turn" with no user record after it.
+    private func isAgentIdle(workspaceId: UUID, panelId: UUID) -> Bool {
+        guard let path = transcriptPath(workspaceId: workspaceId, panelId: panelId) else {
+            return true // No transcript = assume idle (let other checks gate)
+        }
+        guard let handle = FileHandle(forReadingAtPath: path) else { return true }
+        defer { handle.closeFile() }
+
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+              let fileSize = (attrs[.size] as? NSNumber)?.intValue,
+              fileSize > 0 else { return true }
+
+        // Read last 256KB (aimux uses this size to account for trailing bookkeeping)
+        let tailSize = min(fileSize, 256 * 1024)
+        handle.seek(toFileOffset: UInt64(fileSize - tailSize))
+        let chunk = handle.readData(ofLength: tailSize)
+        guard let text = String(data: chunk, encoding: .utf8) else { return true }
+
+        let lines = text.components(separatedBy: "\n").reversed()
+        var sawUserAfterAssistant = false
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty,
+                  let data = trimmed.data(using: .utf8),
+                  let record = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let type = record["type"] as? String else { continue }
+
+            if type == "user" {
+                sawUserAfterAssistant = true
+                continue
+            }
+            guard type == "assistant" else { continue }
+
+            // Found last assistant record
+            let message = record["message"] as? [String: Any]
+            let stopReason = message?["stop_reason"] as? String
+
+            if stopReason == "tool_use" || stopReason == "pause_turn" {
+                return false // mid-turn
+            }
+            // Terminal stop reason — idle unless a user record started a new turn
+            return !sawUserAfterAssistant
+        }
+
+        return true // No assistant record found, assume idle
     }
 
     // MARK: - Ping ack detection
@@ -196,12 +248,11 @@ final class CacheKeepaliveController {
 
     // MARK: - Transcript threshold
 
-    private func transcriptExceedsThreshold(workspaceId: UUID, panelId: UUID) -> Bool {
-        let bytesNeeded = CacheKeepaliveSettings.minTranscriptBytes()
+    private func measureTranscriptBytes(workspaceId: UUID, panelId: UUID) -> Int {
         guard let path = transcriptPath(workspaceId: workspaceId, panelId: panelId) else {
-            return false
+            return 0
         }
-        return measureBytesSinceLastCompact(path: path) >= bytesNeeded
+        return measureBytesSinceLastCompact(path: path)
     }
 
     private func transcriptPath(workspaceId: UUID, panelId: UUID) -> String? {
@@ -238,6 +289,7 @@ final class CacheKeepaliveController {
         guard let handle = FileHandle(forReadingAtPath: path) else { return fileSize }
         defer { handle.closeFile() }
 
+        // Match statusline.sh: grep for compact_boundary, measure from last occurrence
         let searchSize = min(fileSize, 4 * 1024 * 1024)
         let searchOffset = fileSize - searchSize
         handle.seek(toFileOffset: UInt64(searchOffset))
@@ -246,7 +298,10 @@ final class CacheKeepaliveController {
         guard let needle = "compact_boundary".data(using: .utf8) else { return fileSize }
 
         if let range = chunk.range(of: needle, options: .backwards) {
-            return fileSize - (searchOffset + range.lowerBound)
+            // Find start of the line containing the marker (same as tail -n +LINE)
+            let lineStart = chunk[..<range.lowerBound].lastIndex(of: UInt8(ascii: "\n"))
+                .map { chunk.index(after: $0) } ?? chunk.startIndex
+            return fileSize - (searchOffset + chunk.distance(from: chunk.startIndex, to: lineStart))
         }
 
         return fileSize
